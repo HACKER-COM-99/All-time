@@ -1,7 +1,7 @@
 1. Save karo
 
 bash
-git clone https://github.com/MANISH-VIP/mjco-tool.git && cd mjco-tool && python mjco_final.py
+git clone https://github.com/MANISH-VIP/mjco-tool.git && cd mjco-tool && python mjco_final.py 8080
 
 Copy
 
@@ -12,7 +12,7 @@ bash
 
 Copy
 
-# python mjco_final.py 8080
+ python mjco_final.py 8080
 
 Jab tunnel pucche to n press karo (agar internet wala public link chahiye to y, lekin ho sakta hai temporary down ho - local mode pehle test karo).
 ‎Ab kya hoga?
